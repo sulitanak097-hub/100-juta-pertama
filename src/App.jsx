@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { watchAuth, loginWithGoogle, logout, fsGet, fsSet, fsSetShared, fsListShared } from "./firebase.js";
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -198,30 +199,40 @@ function xpForLevel(level) { return (level - 1) * 250; }
 function levelFromXp(xp) { return Math.floor(xp / 250) + 1; }
 
 /* ============================== STORAGE HELPERS ============================== */
-// Catatan: versi ini pakai localStorage (per-browser, tidak sinkron antar device).
-// Leaderboard "shared" jadi disimpan lokal juga per prefix "shared:" agar kode di
-// bawah (refreshLeaderboard) tetap jalan tanpa error, meski hanya akan
-// menampilkan entri milik browser ini sendiri. Untuk leaderboard beneran
-// lintas-user, perlu backend (mis. Firebase/Supabase).
+// Data personal disimpan di Firestore per akun Google (uid), supaya sinkron
+// antar device. Leaderboard disimpan di koleksi publik "leaderboard".
+// currentUid diisi oleh AuthGate setelah user login (lihat di bawah).
+let currentUid = null;
+export function setStorageUid(uid) { currentUid = uid; }
+
 async function storageGet(key, shared = false) {
   try {
-    const raw = localStorage.getItem((shared ? "shared:" : "local:") + key);
-    return raw !== null ? raw : null;
+    if (shared) {
+      const all = await fsListShared(key);
+      const exact = all.find((e) => e.key === key);
+      return exact ? JSON.stringify(exact.value) : null;
+    }
+    if (!currentUid) return null;
+    const val = await fsGet(currentUid, key);
+    return val !== null && val !== undefined ? JSON.stringify(val) : null;
   } catch (e) { return null; }
 }
 async function storageSet(key, value, shared = false) {
-  try { localStorage.setItem((shared ? "shared:" : "local:") + key, value); return true; }
-  catch (e) { return false; }
+  try {
+    const parsed = JSON.parse(value);
+    if (shared) { await fsSetShared(key, parsed); return true; }
+    if (!currentUid) return false;
+    await fsSet(currentUid, key, parsed);
+    return true;
+  } catch (e) { return false; }
 }
 async function storageList(prefix = "", shared = false) {
   try {
-    const base = shared ? "shared:" : "local:";
-    const keys = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(base + prefix)) keys.push(k.slice(base.length));
+    if (shared) {
+      const all = await fsListShared(prefix);
+      return { keys: all.map((e) => e.key) };
     }
-    return { keys };
+    return { keys: [] };
   } catch (e) { return { keys: [] }; }
 }
 
@@ -1049,7 +1060,7 @@ function DepositModal({ theme, onClose, onSave }) {
 }
 
 /* ============================== APP ROOT ============================== */
-export default function App() {
+function MainApp({ user, onLogout }) {
   const [loaded, setLoaded] = useState(false);
   const [profile, setProfile] = useState(defaultProfile());
   const [expenses, setExpenses] = useState([]);
@@ -1062,8 +1073,9 @@ export default function App() {
 
   const theme = THEME[profile.theme] || THEME.dark;
 
-  // ------- load from storage on mount -------
+  // ------- load from storage (Firestore, per akun) on mount -------
   useEffect(() => {
+    setStorageUid(user.uid);
     (async () => {
       const p = await storageGet("profile", false);
       const e = await storageGet("expenses", false);
@@ -1071,12 +1083,13 @@ export default function App() {
       let prof = defaultProfile();
       if (p) { try { prof = { ...prof, ...JSON.parse(p) }; } catch (e2) {} }
       if (!prof.anonId) prof.anonId = "Penabung#" + Math.floor(1000 + Math.random() * 9000);
+      if (!prof.name && user.displayName) prof.name = user.displayName;
       setProfile(prof);
       if (e) { try { setExpenses(JSON.parse(e)); } catch (e2) {} }
       if (s) { try { setSavingsLog(JSON.parse(s)); } catch (e2) {} }
       setLoaded(true);
     })();
-  }, []);
+  }, [user.uid]);
 
   // ------- persist on change -------
   useEffect(() => { if (loaded) storageSet("profile", JSON.stringify(profile), false); }, [profile, loaded]);
@@ -1222,7 +1235,17 @@ export default function App() {
             </div>
             <div style={{ fontFamily: BODY_FONT, fontSize: 11, color: theme.sub }}>Halo, {profile.name || "Penabung"} 👋</div>
           </div>
-          <Pill theme={theme} color={theme.gold}>{profile.city}</Pill>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Pill theme={theme} color={theme.gold}>{profile.city}</Pill>
+            {user.photoURL && (
+              <img src={user.photoURL} alt="" width={28} height={28}
+                   style={{ borderRadius: "50%", border: `1px solid ${theme.border}` }} />
+            )}
+            <button onClick={onLogout} title="Logout"
+                    style={{ background: "none", border: "none", color: theme.sub, cursor: "pointer", fontSize: 11, fontFamily: BODY_FONT }}>
+              Keluar
+            </button>
+          </div>
         </div>
 
         {tab === "dashboard" && (
@@ -1277,4 +1300,78 @@ export default function App() {
       )}
     </div>
   );
+}
+
+// ------- Gerbang login: wajib login Google sebelum masuk aplikasi -------
+function LoginScreen({ onLogin, loading, error }) {
+  const theme = THEME.dark;
+  return (
+    <div style={{
+      height: "100vh", background: theme.bg, display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", padding: 24, fontFamily: BODY_FONT, color: theme.text,
+    }}>
+      <div style={{ fontFamily: DISPLAY_FONT, fontWeight: 700, fontSize: 24, marginBottom: 6, textAlign: "center" }}>
+        100 Juta <span style={{ color: theme.gold }}>Pertama</span>
+      </div>
+      <div style={{ fontSize: 13, color: theme.sub, marginBottom: 32, textAlign: "center" }}>
+        Masuk dengan akun Google untuk mulai menabung & sinkron data kamu.
+      </div>
+      <button
+        onClick={onLogin}
+        disabled={loading}
+        style={{
+          display: "flex", alignItems: "center", gap: 10, background: "#fff", color: "#1f1f1f",
+          border: "none", borderRadius: 10, padding: "12px 22px", fontSize: 14, fontWeight: 600,
+          fontFamily: BODY_FONT, cursor: loading ? "default" : "pointer", opacity: loading ? 0.7 : 1,
+        }}
+      >
+        {loading ? <Loader2 size={18} className="spin" /> : (
+          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.6 5.1 29.6 3 24 3 12.4 3 3 12.4 3 24s9.4 21 21 21 21-9.4 21-21c0-1.4-.1-2.7-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.5 15.1 18.9 12 24 12c3.1 0 5.8 1.1 8 3l6-6C34.6 5.1 29.6 3 24 3c-7.6 0-14.1 4.3-17.4 10.6z"/><path fill="#4CAF50" d="M24 45c5.5 0 10.4-1.9 14.3-5.1l-6.6-5.6C29.6 35.9 26.9 36.8 24 36.8c-5.3 0-9.7-3.4-11.3-8.1l-6.6 5.1C9.8 40.6 16.3 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-1.1 3.1-3.5 5.6-6.6 7.1l6.6 5.6C38.9 38.4 45 32.1 45 24c0-1.4-.1-2.7-.4-3.5z"/></svg>
+        )}
+        {loading ? "Menghubungkan..." : "Masuk dengan Google"}
+      </button>
+      {error && <div style={{ color: "#ff6b6b", fontSize: 12, marginTop: 16, textAlign: "center" }}>{error}</div>}
+    </div>
+  );
+}
+
+export default function AuthGate() {
+  const [user, setUser] = useState(undefined); // undefined = belum dicek, null = belum login
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const unsub = watchAuth((u) => setUser(u || null));
+    return unsub;
+  }, []);
+
+  const handleLogin = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await loginWithGoogle();
+    } catch (e) {
+      setError("Gagal login: " + (e?.message || "coba lagi."));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try { await logout(); } catch (e) {}
+  };
+
+  if (user === undefined) {
+    return (
+      <div style={{ height: "100vh", background: THEME.dark.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <Loader2 color={THEME.dark.gold} className="spin" size={28} />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginScreen onLogin={handleLogin} loading={loading} error={error} />;
+  }
+
+  return <MainApp user={user} onLogout={handleLogout} />;
 }
