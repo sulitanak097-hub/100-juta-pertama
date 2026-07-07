@@ -2,6 +2,33 @@
 
 Aplikasi tracker tabungan + AI Coach (pakai Gemini API) + data UMR seluruh Indonesia.
 
+## 🔥 Setup Firebase (Login Google + Database member)
+
+1. Buka https://console.firebase.google.com → **Add project** → ikuti sampai selesai.
+2. Di dashboard → klik ikon **`</>`** (Add app → Web) → register → copy config yang muncul.
+3. **Authentication**: Build → Authentication → Get started → Sign-in method → **Google** → Enable.
+4. **Firestore**: Build → Firestore Database → Create database → mode **production** → pilih region terdekat (mis. `asia-southeast2`).
+5. **Firestore Rules** — buka tab Rules di Firestore, ganti dengan ini supaya tiap user cuma bisa baca/tulis datanya sendiri, sementara leaderboard bisa dibaca semua orang tapi cuma ditulis oleh pemiliknya:
+   ```
+   rules_version = '2';
+   service cloud.firestore {
+     match /databases/{database}/documents {
+       match /users/{userId}/{document=**} {
+         allow read, write: if request.auth != null && request.auth.uid == userId;
+       }
+       match /leaderboard/{docId} {
+         allow read: if true;
+         allow write: if request.auth != null;
+       }
+     }
+   }
+   ```
+   Klik **Publish**.
+6. Isi 6 variabel `VITE_FIREBASE_*` di `.env` (lokal) / Environment variables Netlify (lihat `.env.example`).
+7. **PENTING setelah deploy ke Netlify**: buka Firebase Console → Authentication → Settings → **Authorized domains** → **Add domain** → masukkan domain Netlify kamu (mis. `nama-acak.netlify.app`). Kalau ini dilewat, tombol "Masuk dengan Google" akan error `auth/unauthorized-domain`.
+
+---
+
 ## ⚠️ WAJIB DULU: revoke API key lama
 
 Kalau kamu pernah share API key (Gemini/Anthropic/apapun) di chat, dokumen, atau
@@ -37,11 +64,17 @@ Jangan taruh key di file manapun yang di-upload ke GitHub (public = siapa saja b
 3. Build settings (biasanya otomatis kedeteksi dari `netlify.toml`):
    - Build command: `npm run build`
    - Publish directory: `dist`
-4. **Sebelum klik Deploy**, buka bagian **"Add environment variables"**:
-   - Key: `VITE_GEMINI_API_KEY`
-   - Value: (paste API key Gemini kamu yang BARU di sini)
+4. **Sebelum klik Deploy**, buka bagian **"Add environment variables"** dan tambahkan SEMUA ini (lihat `.env.example` untuk daftarnya):
+   - `VITE_GEMINI_API_KEY`
+   - `VITE_FIREBASE_API_KEY`
+   - `VITE_FIREBASE_AUTH_DOMAIN`
+   - `VITE_FIREBASE_PROJECT_ID`
+   - `VITE_FIREBASE_STORAGE_BUCKET`
+   - `VITE_FIREBASE_MESSAGING_SENDER_ID`
+   - `VITE_FIREBASE_APP_ID`
 5. Klik **Deploy site**. Tunggu 1–2 menit, Netlify akan build otomatis di server mereka.
 6. Selesai — kamu dapat URL seperti `nama-acak.netlify.app`.
+7. **Jangan lupa** tambahkan URL itu ke **Authorized domains** di Firebase Authentication (lihat bagian Setup Firebase di atas), kalau tidak login Google akan gagal.
 
 ### Update environment variable belakangan (kalau lupa/mau ganti key)
 Site settings → **Environment variables** → tambah/edit `VITE_GEMINI_API_KEY` →
@@ -58,9 +91,11 @@ npm run dev
 ```
 
 ## Catatan teknis
-- Data disimpan pakai `localStorage` browser (per-device, tidak sinkron antar HP/laptop).
-  Leaderboard jadi hanya menampilkan data di browser itu sendiri — untuk leaderboard
-  beneran lintas-user perlu backend (Firebase/Supabase).
+- Login wajib pakai akun Google (Firebase Authentication) sebelum masuk aplikasi.
+- Data profil, expenses, dan riwayat tabungan disimpan di **Firestore**, per akun
+  (`users/{uid}/data/...`) — otomatis sinkron kalau login di device lain.
+- Leaderboard disimpan di koleksi publik `leaderboard` (bisa dibaca semua orang,
+  ditulis hanya oleh pemiliknya sendiri — diatur lewat Firestore Rules).
 - AI Coach memanggil **Gemini 2.0 Flash** (`gemini-2.0-flash`) via
   `generativelanguage.googleapis.com`, key diambil dari `import.meta.env.VITE_GEMINI_API_KEY`.
 - Data UMR di `UMR_DATA` (dalam `App.jsx`) adalah estimasi UMP 2026 38 provinsi +
